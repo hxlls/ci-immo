@@ -117,6 +117,14 @@ jobs:
             ls -1 package/diy 2>/dev/null || true
           fi
 
+      - name: 修补内核新符号
+        run: |
+          cd openwrt
+          # 某些机型的 DEVICE_PACKAGES 会引入没有默认值的新内核符号，
+          # CI 无终端时 kconfig 会卡住询问 -> target/linux 编译失败。
+          # 提前把取值写进 subtarget 内核配置文件即可。
+          bash ../scripts/patch-kernel-symbols.sh
+
       - name: 准备基础配置
         run: |
           mkdir -p work
