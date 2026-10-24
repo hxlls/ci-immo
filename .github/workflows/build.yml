@@ -101,7 +101,7 @@ jobs:
         run: |
           mkdir -p work
           if [ -n "${BASE_CONFIG_URL:-}" ]; then
-            echo "从外部源下载配置: ${BASE_CONFIG_URL}"
+            echo "来源：外部 URL  ${BASE_CONFIG_URL}"
             if [ -n "${CONFIG_TOKEN:-}" ]; then
               curl -fsSL --retry 3 --max-time 300 \
                 -H "Authorization: Bearer ${CONFIG_TOKEN}" \
@@ -109,11 +109,15 @@ jobs:
             else
               curl -fsSL --retry 3 --max-time 300 -o work/base.config "$BASE_CONFIG_URL"
             fi
+          elif [ -f configs/base.config ]; then
+            echo "来源：仓库内 configs/base.config（228 那套原始 .config）"
+            cp configs/base.config work/base.config
           else
-            echo "使用仓库内配置 configs/packages.config"
+            echo "::warning::仓库里没有 configs/base.config，退回最小清单 configs/packages.config —— 插件会和 228 不一致"
             cp configs/packages.config work/base.config
           fi
           echo "基础配置行数: $(wc -l < work/base.config)"
+          echo "其中的包启停行数: $(grep -cE '^CONFIG_PACKAGE_' work/base.config || true)"
 
       - name: 清洗配置并套用黑名单
         run: |
