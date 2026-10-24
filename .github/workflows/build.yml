@@ -23,9 +23,9 @@ on:
         required: false
         default: "mt7986"
       device_filter:
-        description: "机型名正则（留空=不限）。例如 netcore 只编磊科，n60 只编 N60 系列"
+        description: "机型名正则（clx_s20 = 只编 S20P/S20M/S20L；.* = 该芯片全部机型）"
         required: false
-        default: ""
+        default: "clx_s20"
       device_slice:
         description: "分批编译，格式 1/3（第1批共3批）。留空=全部一起编"
         required: false
@@ -44,8 +44,10 @@ env:
   SOURCE_BRANCH: ${{ github.event.inputs.branch || 'n60pro-high-power' }}
   # 按 DEVICE_DTS 前缀筛芯片；这个源码里 7986 设备共 56 个
   CHIP_FILTER: ${{ github.event.inputs.chip_filter || 'mt7986' }}
-  # 机型名正则，留空表示不额外过滤
-  DEVICE_FILTER: ${{ github.event.inputs.device_filter || '' }}
+  # 机型名正则。clx_s20 = 228 验证过的 S20P/S20M/S20L 三个机型；
+  # 填 .* 或不加过滤则编该芯片下全部 56 个 7986 机型
+  # （其中部分设备 WiFi 组合/分区布局与这份高功率源码不匹配，编不过）
+  DEVICE_FILTER: ${{ github.event.inputs.device_filter || 'clx_s20' }}
   # 分批，例如 1/3；留空表示全部
   DEVICE_SLICE: ${{ github.event.inputs.device_slice || '' }}
   # 填了就从外部源下载 .config，留空则用 configs/packages.config
@@ -54,7 +56,7 @@ env:
 
 jobs:
   build:
-    name: "编译 ${{ github.event.inputs.branch || 'n60pro-high-power' }} [${{ github.event.inputs.chip_filter || 'mt7986' }}]"
+    name: "编译 ${{ github.event.inputs.branch || 'n60pro-high-power' }} [${{ github.event.inputs.chip_filter || 'mt7986' }}] ${{ github.event.inputs.device_filter || 'clx_s20' }}"
     runs-on: ubuntu-22.04
     timeout-minutes: 355
 
