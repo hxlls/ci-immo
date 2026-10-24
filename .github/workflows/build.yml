@@ -160,10 +160,12 @@ jobs:
           bash ../scripts/gen-target-config.sh > ../target.config
           echo "===== 生成的 target 配置 ====="
           cat ../target.config
-          # 设备行形如 CONFIG_TARGET_mediatek_filogic_DEVICE_xxx=y
-          # 必须用 [a-z0-9]+_[a-z0-9]+_DEVICE_ 卡住，否则
-          # CONFIG_TARGET_PER_DEVICE_ROOTFS=y 会被误判成一个叫 ROOTFS 的设备
-          DEV_RE='^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$'
+          # 多设备模式下设备行形如
+          #   CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_xxx=y
+          # DEVICE_ 在板名前面（include/image.mk:585 DEVICE_CHECK_PROFILE 的形式）。
+          # 不能写成 CONFIG_TARGET_mediatek_filogic_DEVICE_xxx=y ——
+          # 那和 MULTI_PROFILE 同属一个 choice，会互相覆盖只剩一个。
+          DEV_RE='^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$'
           n="$(grep -cE "$DEV_RE" ../target.config || true)"
           {
             echo "### 本次编译设备（${n} 个）"
@@ -171,10 +173,15 @@ jobs:
             echo '| 设备 |'
             echo '|---|'
             grep -E "$DEV_RE" ../target.config \
-              | sed -E 's/^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_//; s/=y$//' \
+              | sed -E 's/^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_//; s/=y$//' \
               | sed 's/^/| /; s/$/ |/'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "设备数 = ${n}"
+          echo "EXPECT_DEVICES=${n}" >> "$GITHUB_ENV"
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "::error::没有生成任何设备配置"
+            exit 1
+          fi
 
       - name: 应用编译配置
         run: |
@@ -185,9 +192,22 @@ jobs:
           cat ../target.config >> .config
           make defconfig
           echo "----- 生效的 target 配置 -----"
-          grep -E '^CONFIG_TARGET_(mediatek|MULTI|PER_DEVICE)' .config || true
+          grep -E '^CONFIG_TARGET_(mediatek|DEVICE_mediatek|MULTI|PER_DEVICE)' .config || true
           echo "----- 实际选中的设备数 -----"
-          grep -cE '^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$' .config || true
+          act="$(grep -cE '^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$' .config || true)"
+          echo "期望设备数=${EXPECT_DEVICES} 实际=${act}"
+          if [ "${act:-0}" -eq 0 ]; then
+            echo "::error::defconfig 后一个设备都没选上，多设备配置没生效"
+            exit 1
+          fi
+          if [ "${act:-0}" -lt "${EXPECT_DEVICES:-0}" ]; then
+            echo "::warning::有 $((EXPECT_DEVICES - act)) 个设备没选上："
+            grep -E '^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$' ../target.config \
+              | sed -E 's/^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_//; s/=y$//' | sort > /tmp/want.txt
+            grep -E '^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$' .config \
+              | sed -E 's/^CONFIG_TARGET_DEVICE_[a-z0-9]+_[a-z0-9]+_DEVICE_//; s/=y$//' | sort > /tmp/got.txt
+            comm -23 /tmp/want.txt /tmp/got.txt | sed 's/^/  缺失: /' || true
+          fi
 
       - name: 校验替换结果
         run: |
@@ -318,22 +338,31 @@ jobs:
             \( -name "*sysupgrade*" -o -name "*factory*" -o -name "*initramfs*" \
                -o -name "*.manifest" -o -name "sha256sums" \) \
             -exec cp {} artifacts/ \;
+          cp -f openwrt/build.log artifacts/build.log 2>/dev/null || true
           echo "----- 产物列表 -----"
-          ls -lh artifacts
+          ls -lh artifacts | head -40
           echo "----- 固件数量 -----"
           ls -1 artifacts | grep -cE 'sysupgrade|factory' || true
+          echo "----- 产物总体积 -----"
+          du -sh artifacts
 
       - name: 生成版本号
         if: success()
         id: meta
         run: echo "stamp=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
 
+      # 56 个机型的固件加起来有几个 GB，超出免费账户 500MB 的 Artifact 配额，
+      # 所以 Artifact 只放校验和/清单/日志这类小文件，固件本体全部走 Release。
       - name: 上传 Artifact
         if: success()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ steps.meta.outputs.stamp }}
-          path: artifacts/*
+          name: info-${{ steps.meta.outputs.stamp }}
+          path: |
+            artifacts/sha256sums
+            artifacts/*.manifest
+            artifacts/build.log
           retention-days: 30
           compression-level: 0
 
@@ -347,7 +376,13 @@ jobs:
             自动编译产出
 
             - 源码：${{ env.SOURCE_REPO }} @ `${{ env.SOURCE_BRANCH }}`
-            - 提交：${{ steps.src.outputs.sha }}
-            - 设备过滤：`${{ env.DEVICE_FILTER }}`
+            - 提交：`${{ steps.src.outputs.sha }}`
+            - 设备范围：`${{ env.CHIP_FILTER }}`（期望 ${{ env.EXPECT_DEVICES }} 个机型）
+            - 机型名过滤：`${{ env.DEVICE_FILTER || '（无）' }}`
+            - 分批：`${{ env.DEVICE_SLICE || '（全部一起编）' }}`
+
+            文件说明：`*-sysupgrade.*` 是升级固件，`*-factory.*` 是出厂格式，
+            `*-initramfs-*` 是恢复/救砖镜像，`*.manifest` 是每个固件的包清单，
+            `sha256sums` 是校验和。
           files: artifacts/*
           fail_on_unmatched_files: false

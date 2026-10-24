@@ -139,6 +139,25 @@ log "本次将编译 ${HIT} 个设备："
 printf '%s\n' "$MATCHED" | awk -F'\t' '{printf "  * %-45s [%s]\n", $1, $2}' >&2
 
 # ---------- 6. 输出 config ----------
+# 多设备模式的符号形式（已在源码里逐层确认）：
+#
+#   include/image.mk:585
+#     DEVICE_CHECK_PROFILE = $(CONFIG_TARGET_$(if $(CONFIG_TARGET_MULTI_PROFILE),DEVICE_)...)
+#   scripts/target-metadata.pl 生成的 tmp/.config-target.in：
+#     choice "Target Profile" 的成员 = TARGET_MULTI_PROFILE + 所有
+#     TARGET_<板>_<子>_DEVICE_<机型>，互斥，只能选一个；
+#     menu "Target Devices"（depends on TARGET_MULTI_PROFILE）里才是
+#     TARGET_DEVICE_<板>_<子>_DEVICE_<机型>，可多选。
+#
+#   所以多设备必须写成：
+#     CONFIG_TARGET_MULTI_PROFILE=y
+#     CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+#     CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_<机型>=y   ← DEVICE_ 在板名前面
+#
+#   如果写成 CONFIG_TARGET_mediatek_filogic_DEVICE_<机型>=y，
+#   56 个 y 会作为 choice 成员互相覆盖（kconfig 报
+#   override: ... changes choice state），最后只剩字母序最后一个设备，
+#    MULTI_PROFILE 也被顶掉 —— 表现为"只编出 1 个固件"。
 SUBS="$(printf '%s\n' "$MATCHED" | awk -F'\t' '{print $2}' | sort -u)"
 echo "CONFIG_TARGET_${TARGET}=y"
 while IFS= read -r s; do
@@ -149,5 +168,5 @@ echo "CONFIG_TARGET_MULTI_PROFILE=y"
 echo "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"
 while IFS=$'\t' read -r dev sub; do
   [ -n "${dev:-}" ] || continue
-  echo "CONFIG_TARGET_${TARGET}_${sub}_DEVICE_${dev}=y"
+  echo "CONFIG_TARGET_DEVICE_${TARGET}_${sub}_DEVICE_${dev}=y"
 done <<< "$MATCHED"
