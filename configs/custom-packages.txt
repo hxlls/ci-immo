@@ -1,0 +1,6 @@
+# 自己的包：标识名|仓库地址|分支|子目录（后两项留空即可）
+#
+# 第一列只是标签，真正生效的包名以仓库 Makefile 里的 define Package/ 为准。
+# 所以这里的 luci-app-upnp-lease-time 指的是仓库名，
+# 脚本解析后发现里面定义的是 luci-app-upnp，就会把 feeds 里那个同名包顶掉。
+luci-app-upnp-lease-time|https://github.com/hxlls/luci-app-upnp-lease-time.git||

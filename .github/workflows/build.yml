@@ -1,0 +1,309 @@
+name: Build Firmware
+
+on:
+  schedule:
+    # 每天 UTC 18:30 = 北京时间 02:30
+    - cron: "30 18 * * *"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "源码分支"
+        required: false
+        default: "n60pro-high-power"
+      chip_filter:
+        description: "芯片筛选：按 DEVICE_DTS 前缀匹配，mt7986 = 该平台所有 7986 机型"
+        required: false
+        default: "mt7986"
+      device_filter:
+        description: "机型名正则（留空=不限）。例如 netcore 只编磊科，n60 只编 N60 系列"
+        required: false
+        default: ""
+      device_slice:
+        description: "分批编译，格式 1/3（第1批共3批）。留空=全部一起编"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-build
+  cancel-in-progress: false
+
+env:
+  # 源码仓库（Gitea 镜像，只读）。注意仓库名是 hightpower（多一个 t）
+  SOURCE_REPO: https://github.com/hxlls/n60pro-hightpower-immo.git
+  SOURCE_BRANCH: ${{ github.event.inputs.branch || 'n60pro-high-power' }}
+  # 按 DEVICE_DTS 前缀筛芯片；这个源码里 7986 设备共 56 个
+  CHIP_FILTER: ${{ github.event.inputs.chip_filter || 'mt7986' }}
+  # 机型名正则，留空表示不额外过滤
+  DEVICE_FILTER: ${{ github.event.inputs.device_filter || '' }}
+  # 分批，例如 1/3；留空表示全部
+  DEVICE_SLICE: ${{ github.event.inputs.device_slice || '' }}
+  # 填了就从外部源下载 .config，留空则用 configs/packages.config
+  BASE_CONFIG_URL: ""
+  CONFIG_TOKEN: ${{ secrets.CONFIG_TOKEN }}
+
+jobs:
+  build:
+    name: "编译 ${{ github.event.inputs.branch || 'n60pro-high-power' }} [${{ github.event.inputs.chip_filter || 'mt7986' }}]"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 355
+
+    steps:
+      - name: 释放磁盘空间
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - name: 检出编译仓库
+        uses: actions/checkout@v4
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get -y install \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev libelf-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            ccache bc time xxd
+          sudo ln -sf /usr/bin/python3 /usr/bin/python || true
+          df -h /
+
+      - name: 克隆源码
+        id: src
+        run: |
+          git clone --depth 1 --single-branch -b "$SOURCE_BRANCH" "$SOURCE_REPO" openwrt
+          cd openwrt
+          echo "源码提交: $(git log -1 --format='%h  %s')"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 更新 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 替换 feeds 里的同名包
+        run: |
+          cd openwrt
+          bash ../scripts/replace-packages.sh \
+            ../configs/custom-packages.txt \
+            ../replaced-pkgs.txt
+
+      - name: 准备基础配置
+        run: |
+          mkdir -p work
+          if [ -n "${BASE_CONFIG_URL:-}" ]; then
+            echo "从外部源下载配置: ${BASE_CONFIG_URL}"
+            if [ -n "${CONFIG_TOKEN:-}" ]; then
+              curl -fsSL --retry 3 --max-time 300 \
+                -H "Authorization: Bearer ${CONFIG_TOKEN}" \
+                -o work/base.config "$BASE_CONFIG_URL"
+            else
+              curl -fsSL --retry 3 --max-time 300 -o work/base.config "$BASE_CONFIG_URL"
+            fi
+          else
+            echo "使用仓库内配置 configs/packages.config"
+            cp configs/packages.config work/base.config
+          fi
+          echo "基础配置行数: $(wc -l < work/base.config)"
+
+      - name: 清洗配置并套用黑名单
+        run: |
+          # 被我们自己仓库替换的包不能出现在黑名单里，否则会把自己那份关掉。
+          # 这里先做一遍过滤，即使黑名单里误写了也不会出问题。
+          : > work/blacklist.effective.txt
+          while IFS= read -r raw || [ -n "${raw:-}" ]; do
+            line="$(printf '%s' "$raw" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -n "$line" ] || continue
+            case "$line" in
+              \#*) echo "$line" >> work/blacklist.effective.txt; continue ;;
+            esac
+            pkg="${line#CONFIG_PACKAGE_}"
+            if [ -f replaced-pkgs.txt ] && grep -qxF "$pkg" replaced-pkgs.txt; then
+              echo "跳过黑名单项 ${line}：该包由我们的仓库替换，移除它会导致改版失效"
+              continue
+            fi
+            echo "$line" >> work/blacklist.effective.txt
+          done < configs/blacklist.txt
+
+          echo "----- 实际生效的黑名单 -----"
+          grep -vE '^[[:space:]]*(#|$)' work/blacklist.effective.txt || echo "（无）"
+
+          bash scripts/apply-config.sh work/base.config work/blacklist.effective.txt > work/final.config
+          echo "----- 已移除的包 -----"
+          grep -E 'is not set' work/final.config || echo "（无）"
+
+      - name: 扫描设备并生成 target 配置
+        run: |
+          cd openwrt
+          bash ../scripts/gen-target-config.sh > ../target.config
+          echo "===== 生成的 target 配置 ====="
+          cat ../target.config
+          n="$(grep -cE '^CONFIG_TARGET_.*_DEVICE_.+=y$' ../target.config || true)"
+          {
+            echo "### 本次编译设备（${n} 个）"
+            echo ""
+            echo '| 设备 | 芯片 DTS |'
+            echo '|---|---|'
+            grep -E '^CONFIG_TARGET_.*_DEVICE_.+=y$' ../target.config \
+              | sed -E 's/^CONFIG_TARGET_.*_DEVICE_//; s/=y$//' \
+              | sed 's/^/| /; s/$/ | /'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "设备数 = ${n}"
+
+      - name: 应用编译配置
+        run: |
+          cd openwrt
+          cp ../work/final.config .config
+          printf '\n# ===== 强制开启 =====\n' >> .config
+          cat ../configs/additions.config >> .config
+          cat ../target.config >> .config
+          make defconfig
+          echo "----- 生效的 target 配置 -----"
+          grep -E '^CONFIG_TARGET_(mediatek|MULTI|PER_DEVICE)' .config || true
+          echo "----- 实际选中的设备数 -----"
+          grep -cE '^CONFIG_TARGET_.*_DEVICE_.+=y$' .config || true
+
+      - name: 校验替换结果
+        run: |
+          cd openwrt
+          if [ ! -s ../replaced-pkgs.txt ]; then
+            echo "::error::没有识别到任何自定义包，替换环节失败了"
+            exit 1
+          fi
+
+          fail=0
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            echo "===== ${pkg} ====="
+
+            echo "   Makefile 定义:"
+            grep -hE '^[[:space:]]*(PKG_NAME|PKG_VERSION|DEPENDS)[[:space:]]*:?=' \
+              "package/${pkg}/Makefile" 2>/dev/null | sed 's/^/     /' || echo "     （读不到）"
+
+            # feeds 里不能再留同名包，否则就是重复定义
+            if ls -d package/feeds/*/"$pkg" >/dev/null 2>&1; then
+              echo "::error::feeds 里仍有 ${pkg}，会造成同名包重复定义"
+              ls -ld package/feeds/*/"$pkg" || true
+              fail=$((fail + 1))
+            fi
+
+            # 必须真的在 .config 里是 =y，否则固件里没有这个包
+            if grep -qxF "CONFIG_PACKAGE_${pkg}=y" .config; then
+              echo "   .config: 已启用 =y"
+            else
+              echo "::error::${pkg} 没有在 .config 里启用，编出来的固件会缺这个包"
+              grep -n "PACKAGE_${pkg}" .config | head -5 || echo "     .config 里完全没有这个包名"
+              fail=$((fail + 1))
+            fi
+
+            # 界面文件在不在，判断是不是 luci 界面包
+            if [ -d "package/${pkg}/root" ] || [ -d "package/${pkg}/htdocs" ]; then
+              echo "   界面: $(cd "package/${pkg}" && ls -d root htdocs 2>/dev/null | tr '\n' ' ')"
+            else
+              echo "::warning::${pkg} 里既没有 root/ 也没有 htdocs/，可能不会出现在 LuCI 菜单里"
+            fi
+          done < ../replaced-pkgs.txt
+
+          if [ "$fail" -gt 0 ]; then
+            echo "::error::有 ${fail} 项检查未通过，中止编译，避免白跑几小时"
+            exit 1
+          fi
+          echo "全部通过"
+
+      - name: 校验黑名单没被拉回来
+        run: |
+          cd openwrt
+          bash ../scripts/apply-config.sh --check .config ../work/blacklist.effective.txt
+
+      - name: 缓存下载目录
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ env.SOURCE_BRANCH }}-${{ github.run_id }}
+          restore-keys: |
+            dl-${{ env.SOURCE_BRANCH }}-
+            dl-
+
+      - name: 下载源码包
+        run: |
+          cd openwrt
+          set -o pipefail
+          make -j"$(nproc)" download 2>&1 | tail -n 80
+
+      - name: 编译固件
+        run: |
+          cd openwrt
+          set -o pipefail
+          # -k：单个设备失败（最常见是固件超出分区大小）不影响其他设备继续编
+          make -j"$(nproc)" -k 2>&1 | tee build.log | tail -n 150
+          rc=${PIPESTATUS[0]}
+          n="$(find bin/targets -type f -name '*sysupgrade*' 2>/dev/null | wc -l)"
+          echo "make 退出码=${rc}，已产出 sysupgrade 固件 ${n} 个"
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "::error::一个固件都没产出，编译彻底失败"
+            exit 1
+          fi
+          if [ "${rc}" -ne 0 ]; then
+            echo "::warning::有设备编译失败，其余 ${n} 个固件正常，继续收集产物"
+            echo "----- 失败摘要 -----"
+            grep -nE 'ERROR:|image.*too big|Error [0-9]+' build.log | tail -30 || true
+          fi
+
+      - name: 失败时输出错误摘要
+        if: failure()
+        run: |
+          if [ -f openwrt/build.log ]; then
+            echo "----- 错误摘要 -----"
+            grep -nE 'ERROR|Error [0-9]+|error:' openwrt/build.log | tail -60 || tail -n 60 openwrt/build.log
+          fi
+
+      - name: 收集固件
+        if: success()
+        run: |
+          mkdir -p artifacts
+          find openwrt/bin/targets -type f \
+            \( -name "*sysupgrade*" -o -name "*factory*" -o -name "*initramfs*" \
+               -o -name "*.manifest" -o -name "sha256sums" \) \
+            -exec cp {} artifacts/ \;
+          echo "----- 产物列表 -----"
+          ls -lh artifacts
+          echo "----- 固件数量 -----"
+          ls -1 artifacts | grep -cE 'sysupgrade|factory' || true
+
+      - name: 生成版本号
+        if: success()
+        id: meta
+        run: echo "stamp=$(date -u +%Y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 Artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.meta.outputs.stamp }}
+          path: artifacts/*
+          retention-days: 30
+          compression-level: 0
+
+      - name: 发布 Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: fw-${{ steps.meta.outputs.stamp }}-r${{ github.run_number }}
+          name: 固件 ${{ steps.meta.outputs.stamp }}
+          body: |
+            自动编译产出
+
+            - 源码：${{ env.SOURCE_REPO }} @ `${{ env.SOURCE_BRANCH }}`
+            - 提交：${{ steps.src.outputs.sha }}
+            - 设备过滤：`${{ env.DEVICE_FILTER }}`
+          files: artifacts/*
+          fail_on_unmatched_files: false

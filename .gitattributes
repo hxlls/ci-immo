@@ -1,0 +1,8 @@
+# 统一用 LF。脚本在 Linux runner 上执行，带 CR 会报 $'\r': command not found
+* text=auto eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.config text eol=lf
+*.txt  text eol=lf
+*.md   text eol=lf
