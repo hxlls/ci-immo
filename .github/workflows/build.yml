@@ -300,43 +300,80 @@ jobs:
         uses: actions/cache@v4
         with:
           path: openwrt/dl
-          key: dl-${{ env.SOURCE_BRANCH }}-${{ github.run_id }}
+          # key 里的 v2：上一次编译在内核阶段失败，怀疑缓存里的源码包
+          # 不完整/损坏（make download 见到文件存在就不会重下）。
+          # 换前缀强制 miss，让本次重新全量下载校验一遍。
+          key: dl-v2-${{ env.SOURCE_BRANCH }}-${{ github.run_id }}
           restore-keys: |
-            dl-${{ env.SOURCE_BRANCH }}-
-            dl-
+            dl-v2-${{ env.SOURCE_BRANCH }}-
+            dl-v2-
 
       - name: 下载源码包
         run: |
           cd openwrt
           set -o pipefail
-          make -j"$(nproc)" download 2>&1 | tail -n 80
+          # 同上：`| tail` 配 pipefail + bash -e 会让下载失败时直接中断且看不到错误。
+          # 这里失败自动重试两次，每次输出完整日志尾部。
+          ok=0
+          for i in 1 2 3; do
+            echo "----- 第 ${i} 次 make download -----"
+            if make -j"$(nproc)" download > dl.log 2>&1; then
+              ok=1
+              break
+            fi
+            tail -n 40 dl.log
+          done
+          [ "$ok" = "1" ] || { echo "::error::源码包下载失败"; tail -n 80 dl.log; exit 1; }
 
       - name: 编译固件
         run: |
           cd openwrt
           set -o pipefail
-          # -k：单个设备失败（最常见是固件超出分区大小）不影响其他设备继续编
-          make -j"$(nproc)" -k 2>&1 | tee build.log | tail -n 150
-          rc=${PIPESTATUS[0]}
+          echo "----- 编译前磁盘/内存 -----"
+          df -h /
+          free -h
+          # -k：单个设备失败（最常见是固件超出分区大小）不影响其他设备继续编。
+          # 注意：不能写成 `make ... | tee build.log | tail` 后直接读 PIPESTATUS——
+          # GitHub 用 bash -e 跑脚本，配 pipefail 时 make 一失败整个步骤就中断，
+          # 后面的优雅处理全是死代码（上一次编译就是这么把 exit code 2 交上去的）。
+          rc=0
+          make -j"$(nproc)" -k 2>&1 | tee build.log | tail -n 150 || rc=$?
           n="$(find bin/targets -type f -name '*sysupgrade*' 2>/dev/null | wc -l)"
           echo "make 退出码=${rc}，已产出 sysupgrade 固件 ${n} 个"
+          echo "----- 编译后磁盘 -----"
+          df -h /
+          if [ "${rc}" -ne 0 ]; then
+            echo "----- 失败摘要 -----"
+            grep -nE 'ERROR:|Error [0-9]+|error:|No space' build.log | tail -30 || true
+            # 并行编译会吞掉真实错误（toplevel.mk 的 WARN_PARALLEL_ERROR 机制），
+            # 按官方提示用 -j1 V=s 重跑内核编译，把真正的错误暴露出来。
+            # make 会跳过已编好的部分，只重编失败的内核，不会从头再来。
+            echo "----- 用 -j1 V=s 重跑内核编译，抓真实错误 -----"
+            rc2=0
+            make target/linux/compile -j1 V=s > kernel-retry.log 2>&1 || rc2=$?
+            echo "内核重跑退出码=${rc2}"
+            tail -n 300 kernel-retry.log
+          fi
           if [ "${n:-0}" -eq 0 ]; then
             echo "::error::一个固件都没产出，编译彻底失败"
             exit 1
           fi
           if [ "${rc}" -ne 0 ]; then
             echo "::warning::有设备编译失败，其余 ${n} 个固件正常，继续收集产物"
-            echo "----- 失败摘要 -----"
-            grep -nE 'ERROR:|image.*too big|Error [0-9]+' build.log | tail -30 || true
           fi
 
-      - name: 失败时输出错误摘要
+      # 编译失败时 build.log 和内核重跑日志是定位问题的唯一依据，
+      # 必须落到 artifact 里，否则 runner 一回收什么都看不到。
+      - name: 上传失败日志
         if: failure()
-        run: |
-          if [ -f openwrt/build.log ]; then
-            echo "----- 错误摘要 -----"
-            grep -nE 'ERROR|Error [0-9]+|error:' openwrt/build.log | tail -60 || tail -n 60 openwrt/build.log
-          fi
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: |
+            openwrt/build.log
+            openwrt/kernel-retry.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: 收集固件
         if: success()
