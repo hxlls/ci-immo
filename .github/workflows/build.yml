@@ -1,6 +1,14 @@
 name: Build Firmware
 
 on:
+  push:
+    branches:
+      - main
+    # 只改文档时不触发编译，省几个小时的 CI
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - ".workbuddy/**"
   schedule:
     # 每天 UTC 18:30 = 北京时间 02:30
     - cron: "30 18 * * *"

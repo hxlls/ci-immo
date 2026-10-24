@@ -1,0 +1,11 @@
+# 本地工作区数据（记忆/日志/临时脚本），不进仓库
+.workbuddy/
+
+# 编译产物
+openwrt/
+artifacts/
+work/
+target.config
+final.config
+replaced-pkgs.txt
+*.log
