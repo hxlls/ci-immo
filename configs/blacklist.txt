@@ -1,8 +1,24 @@
-# 从固件里移除的包，每行一个。
-# 想删别的包，在下面照着加一行即可（不带 CONFIG_PACKAGE_ 前缀）。
-luci-app-tlink
+# 从固件里移除的包。
+#
+# 两种写法：
+#   包名          精确禁用
+#   regex:模式    正则禁用所有匹配的符号
+#
+# 需求：228 那套配置里除了 gecoosac 和 tlink，其他全保留。
 
-# ⚠️ 绝对不要在这里写 luci-app-upnp。
-# 你的改版是「顶替」上游同名包，不是「另加一个」，
-# 写进黑名单会把你自己那份也关掉。替换工作由 scripts/replace-packages.sh 完成，
-# 它会删掉 feeds 里的同名包链接，不需要黑名单参与。
+# ---------- gecoosac ----------
+# 228 上的实际包名是 gecoosac（不是 gecoos），三处：
+#   CONFIG_PACKAGE_gecoosac
+#   CONFIG_PACKAGE_luci-app-gecoosac
+#   CONFIG_PACKAGE_luci-i18n-gecoosac-zh-cn
+regex:[-_]gecoos
+
+# ---------- tlink ----------
+# 边界匹配，避免误伤 stlink（ST-Link 调试工具）
+# 和 kmod-nf-conntrack-netlink 这类名字里带 tlink 的正常包。
+# 命中：luci-app-tlink / luci-i18n-tlink-zh-cn / tlink
+regex:(^|[-_])tlink([-_]|$)
+
+# 注意：不要把 luci-app-upnp、miniupnpd 写进来。
+# 这两个包由你的仓库（luci-app-upnp + miniupnpd）顶替，
+# 写进黑名单会把自己那份关掉。替换由 replace-packages.sh 完成。

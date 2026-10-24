@@ -1,6 +1,19 @@
-# 自己的包：标识名|仓库地址|分支|子目录（后两项留空即可）
+# 需要从外部拉进源码树的包：标识名|仓库地址|分支|子目录（后两项留空即可）
 #
-# 第一列只是标签，真正生效的包名以仓库 Makefile 里的 define Package/ 为准。
-# 所以这里的 luci-app-upnp-lease-time 指的是仓库名，
-# 脚本解析后发现里面定义的是 luci-app-upnp，就会把 feeds 里那个同名包顶掉。
-luci-app-upnp-lease-time|https://github.com/hxlls/luci-app-upnp-lease-time.git||
+# 第一列是「兜底包名」：当仓库根目录就是包、且 Makefile 里没写包名时用它。
+# 实际生效的包名仍以 Makefile 解析结果为准（define Package/ > BuildPackage > PKG_NAME > 目录名）。
+#
+# 说明：228 上的 package/diy/ 下面有几个独立 git 仓库，主仓库里只存了空引用
+#       （没有 .gitmodules），所以 github 上 clone 下来的源码里那些目录是空的。
+#       这里就是补上它们。
+
+# 你的 upnp 改版：仓库里同时含 luci-app-upnp 和 miniupnpd 两个包
+luci-app-upnp|https://github.com/hxlls/luci-app-upnp-lease-time.git||
+
+# aurora 主题（228 配置里 luci-theme-aurora 和 luci-app-aurora-config 都是 =y，
+# 不拉这两个，固件里就没有主题，kconfig 会静默丢弃这两个符号）
+luci-theme-aurora|https://github.com/eamonxg/luci-theme-aurora.git||
+luci-app-aurora-config|https://github.com/eamonxg/luci-app-aurora-config.git||
+
+# 不拉的：openwrt-gecoosac 和 Tlink 是 228 上另两个独立仓库，
+# 但你要移除 gecoos 和 tlink，所以不引入。

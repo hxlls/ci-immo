@@ -24,13 +24,46 @@ OUTFILE="${2:-$(pwd)/../replaced-pkgs.txt}"
 
 clean() { printf '%s' "${1:-}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
+# 判断一个 Makefile 是不是包定义文件
+# luci 插件不写 define Package/，只写 LUCI_DEPENDS + include luci.mk，
+# 所以不能只认 define Package/，否则整目录会被漏掉。
+is_pkg_makefile() {
+  local mk="$1"
+  [ -f "$mk" ] || return 1
+  grep -qE 'define[[:space:]]+Package/|call[[:space:]]+BuildPackage|luci\.mk|INCLUDE_DIR\)/package\.mk|^[[:space:]]*PKG_NAME[[:space:]]*:?=' "$mk" 2>/dev/null
+}
+
 # 取某个目录 Makefile 里定义的全部真实包名
-# define Package/xxx 与 define Package/xxx/install 这类子段都会归到 xxx
+# 一个包目录可能定义多个包（例如 miniupnpd 目录下有
+# miniupnpd / miniupnpd-iptables / miniupnpd-nftables）。
+# luci 插件通常不写 define Package/，包名等于目录名，所以要兜底。
+#   $2 = 兜底包名（仓库根场景传清单第一列，子目录场景传目录名）
 pkgs_in_dir() {
-  local mk="$1/Makefile"
+  local dir="$1" fallback="$2" mk="$1/Makefile" out=""
   [ -f "$mk" ] || return 0
-  grep -hoE 'define[[:space:]]+Package/[A-Za-z0-9._+-]+' "$mk" 2>/dev/null \
-    | sed -E 's/.*Package\///' | sort -u || true
+
+  # 1) define Package/xxx（含 /install、/description 等子段，会被前缀匹配截断）
+  out="$(grep -hoE 'define[[:space:]]+Package/[A-Za-z0-9._+-]+' "$mk" 2>/dev/null \
+         | sed -E 's/.*Package\///' | sort -u || true)"
+
+  # 2) $(eval $(call BuildPackage,xxx))
+  if [ -z "$out" ]; then
+    out="$(grep -hoE 'call[[:space:]]+BuildPackage,[A-Za-z0-9._+-]+' "$mk" 2>/dev/null \
+           | sed -E 's/.*BuildPackage,//' | sort -u || true)"
+  fi
+
+  # 3) PKG_NAME:=xxx
+  if [ -z "$out" ]; then
+    out="$(grep -hoE '^[[:space:]]*PKG_NAME[[:space:]]*:?=[[:space:]]*[A-Za-z0-9._+-]+' "$mk" 2>/dev/null \
+           | sed -E 's/.*=[[:space:]]*//' | sort -u || true)"
+  fi
+
+  # 4) luci 包默认用目录名做包名（仓库根场景用清单里写的名字）
+  if [ -z "$out" ]; then
+    out="${fallback:-$(basename "$dir")}"
+  fi
+
+  printf '%s\n' "$out" | grep -v '^$' || true
 }
 
 # 修正 luci 包的 luci.mk 引用
@@ -114,7 +147,7 @@ replace_one() {
   else
     dirs="$(find "$tmp/src" -name .git -prune -o -name Makefile -print 2>/dev/null \
             | while IFS= read -r f; do
-                if grep -qE '^[[:space:]]*define[[:space:]]+Package/' "$f" 2>/dev/null; then
+                if is_pkg_makefile "$f"; then
                   dirname "$f"
                 fi
               done | sort -u)"
@@ -133,9 +166,14 @@ replace_one() {
     [ -n "$d" ] || continue
     d="$(cd "$d" && pwd)"
 
-    pkgs="$(pkgs_in_dir "$d")"
+    # 仓库根就是包时，兜底包名用清单第一列；子目录则用目录名
+    if [ "$d" = "$srcroot" ]; then
+      pkgs="$(pkgs_in_dir "$d" "$ident")"
+    else
+      pkgs="$(pkgs_in_dir "$d" "$(basename "$d")")"
+    fi
     if [ -z "$pkgs" ]; then
-      echo "  跳过 ${d}：Makefile 里没有 define Package/"
+      echo "  跳过 ${d}：无法识别包名"
       continue
     fi
     primary="$(printf '%s\n' "$pkgs" | head -n 1)"
@@ -167,11 +205,11 @@ replace_one() {
 
     fix_luci_include "package/${target}"
 
-    # 把真实包名登记下来，供后续校验和 .config 检查使用
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      grep -qxF "$p" "$OUTFILE" || echo "$p" >> "$OUTFILE"
-    done <<< "$pkgs"
+    # 登记：一行一个包目录，格式「目录<TAB>该目录定义的包名列表」
+    # 校验步骤按目录判断「至少一个包被启用」，因为同一目录常有虚拟包
+    # （例如 miniupnpd 只是 PROVIDES，实际启用的是 miniupnpd-nftables）
+    printf '%s\t%s\n' "$target" \
+      "$(printf '%s' "$pkgs" | tr '\n' ' ' | sed -e 's/[[:space:]]*$//')" >> "$OUTFILE"
 
     assert_unique "$target"
   done <<< "$dirs"

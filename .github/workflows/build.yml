@@ -97,6 +97,15 @@ jobs:
             ../configs/custom-packages.txt \
             ../replaced-pkgs.txt
 
+          # 源码里 package/diy/* 有几个是独立 git 仓库（主仓库只存了空引用），
+          # clone 下来是空目录。清掉，避免 make 扫到没有 Makefile 的目录。
+          if [ -d package/diy ]; then
+            echo "----- 清理 package/diy 下的空目录 -----"
+            find package/diy -mindepth 1 -maxdepth 1 -type d -empty -print -delete 2>/dev/null || true
+            echo "----- 清理后 -----"
+            ls -1 package/diy 2>/dev/null || true
+          fi
+
       - name: 准备基础配置
         run: |
           mkdir -p work
@@ -151,15 +160,19 @@ jobs:
           bash ../scripts/gen-target-config.sh > ../target.config
           echo "===== 生成的 target 配置 ====="
           cat ../target.config
-          n="$(grep -cE '^CONFIG_TARGET_.*_DEVICE_.+=y$' ../target.config || true)"
+          # 设备行形如 CONFIG_TARGET_mediatek_filogic_DEVICE_xxx=y
+          # 必须用 [a-z0-9]+_[a-z0-9]+_DEVICE_ 卡住，否则
+          # CONFIG_TARGET_PER_DEVICE_ROOTFS=y 会被误判成一个叫 ROOTFS 的设备
+          DEV_RE='^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$'
+          n="$(grep -cE "$DEV_RE" ../target.config || true)"
           {
             echo "### 本次编译设备（${n} 个）"
             echo ""
-            echo '| 设备 | 芯片 DTS |'
-            echo '|---|---|'
-            grep -E '^CONFIG_TARGET_.*_DEVICE_.+=y$' ../target.config \
-              | sed -E 's/^CONFIG_TARGET_.*_DEVICE_//; s/=y$//' \
-              | sed 's/^/| /; s/$/ | /'
+            echo '| 设备 |'
+            echo '|---|'
+            grep -E "$DEV_RE" ../target.config \
+              | sed -E 's/^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_//; s/=y$//' \
+              | sed 's/^/| /; s/$/ |/'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "设备数 = ${n}"
 
@@ -174,7 +187,7 @@ jobs:
           echo "----- 生效的 target 配置 -----"
           grep -E '^CONFIG_TARGET_(mediatek|MULTI|PER_DEVICE)' .config || true
           echo "----- 实际选中的设备数 -----"
-          grep -cE '^CONFIG_TARGET_.*_DEVICE_.+=y$' .config || true
+          grep -cE '^CONFIG_TARGET_[a-z0-9]+_[a-z0-9]+_DEVICE_.+=y$' .config || true
 
       - name: 校验替换结果
         run: |
@@ -184,37 +197,64 @@ jobs:
             exit 1
           fi
 
-          fail=0
-          while IFS= read -r pkg; do
-            [ -n "$pkg" ] || continue
-            echo "===== ${pkg} ====="
+          echo "----- 解析到的包目录 / 包名 -----"
+          cat ../replaced-pkgs.txt
 
-            echo "   Makefile 定义:"
-            grep -hE '^[[:space:]]*(PKG_NAME|PKG_VERSION|DEPENDS)[[:space:]]*:?=' \
-              "package/${pkg}/Makefile" 2>/dev/null | sed 's/^/     /' || echo "     （读不到）"
+          fail=0
+          while IFS=$'\t' read -r dir pkgnames || [ -n "${dir:-}" ]; do
+            [ -n "${dir:-}" ] || continue
+            echo "===== ${dir} ====="
+            echo "   定义的包: ${pkgnames}"
 
             # feeds 里不能再留同名包，否则就是重复定义
-            if ls -d package/feeds/*/"$pkg" >/dev/null 2>&1; then
-              echo "::error::feeds 里仍有 ${pkg}，会造成同名包重复定义"
-              ls -ld package/feeds/*/"$pkg" || true
+            for p in $pkgnames; do
+              if ls -d package/feeds/*/"$p" >/dev/null 2>&1; then
+                echo "::error::feeds 里仍有 ${p}，会造成同名包重复定义"
+                ls -ld package/feeds/*/"$p" || true
+                fail=$((fail + 1))
+              fi
+            done
+
+            # 包目录必须真的落位
+            if [ ! -f "package/${dir}/Makefile" ]; then
+              echo "::error::package/${dir}/Makefile 不存在，clone 或落位失败"
               fail=$((fail + 1))
+              continue
             fi
 
-            # 必须真的在 .config 里是 =y，否则固件里没有这个包
-            if grep -qxF "CONFIG_PACKAGE_${pkg}=y" .config; then
-              echo "   .config: 已启用 =y"
-            else
-              echo "::error::${pkg} 没有在 .config 里启用，编出来的固件会缺这个包"
-              grep -n "PACKAGE_${pkg}" .config | head -5 || echo "     .config 里完全没有这个包名"
-              fail=$((fail + 1))
-            fi
+            # 以 228 的 base.config 为准判断「应该启用什么」：
+            #   228 里 =y 的包 → 最终 .config 里也必须 =y
+            #   228 里没有或未启用（含 miniupnpd 这种虚拟包）→ 只提供源码，不要求启用
+            want=""
+            got=""
+            for p in $pkgnames; do
+              if grep -qxF "CONFIG_PACKAGE_${p}=y" ../work/base.config 2>/dev/null; then
+                want="${want} ${p}"
+                if grep -qxF "CONFIG_PACKAGE_${p}=y" .config; then
+                  got="${got} ${p}"
+                else
+                  echo "::error::228 配置要求 ${p}=y，但最终 .config 里没有启用"
+                  echo "     .config 现状: $(grep -E "^CONFIG_PACKAGE_${p}=" .config || echo '（没有这个符号，说明包没被识别）')"
+                  fail=$((fail + 1))
+                fi
+              fi
+            done
+            [ -n "$want" ] && echo "   228 要求启用:${want}"
+            [ -n "$got" ] && echo "   实际已启用:${got}"
+            [ -z "$want" ] && echo "   228 配置未启用该包，仅提供源码"
 
-            # 界面文件在不在，判断是不是 luci 界面包
-            if [ -d "package/${pkg}/root" ] || [ -d "package/${pkg}/htdocs" ]; then
-              echo "   界面: $(cd "package/${pkg}" && ls -d root htdocs 2>/dev/null | tr '\n' ' ')"
-            else
-              echo "::warning::${pkg} 里既没有 root/ 也没有 htdocs/，可能不会出现在 LuCI 菜单里"
-            fi
+            # 界面文件只在 luci 包上检查
+            for p in $pkgnames; do
+              case "$p" in
+                luci-*)
+                  if [ -d "package/${dir}/htdocs" ] || [ -d "package/${dir}/root" ]; then
+                    echo "   ${p} 界面: $(cd "package/${dir}" && ls -d htdocs root 2>/dev/null | tr '\n' ' ')"
+                  else
+                    echo "::warning::${p} 没有 htdocs/ 或 root/，不会出现在 LuCI 菜单里"
+                  fi
+                  ;;
+              esac
+            done
           done < ../replaced-pkgs.txt
 
           if [ "$fail" -gt 0 ]; then
