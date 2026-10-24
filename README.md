@@ -3,7 +3,8 @@
 不要动防火墙里面的那个转发设置，懒得屏蔽了。开启可能会造成重启，MTK的hnat也会绕过这个，也会失效
 已经修复25.12.6的高危补丁。加入mtk 的hqos的小包优先功能<img width="1532" height="646" alt="image" src="https://github.com/user-attachments/assets/4d71d2c8-c17f-4fa9-844a-33eaa18ef71c" />
 <img width="1409" height="731" alt="image" src="https://github.com/user-attachments/assets/c0db11ef-d0c7-4fa3-be5a-4144fd46bcec" />
-。调整官方upnp的刷新频率<img width="964" height="1083" alt="image" src="https://github.com/user-attachments/assets/c5929440-2a53-4d2d-8e41-c000234cd46c" />
-。替换原有的fullcone为	SONiC Fullcone
+。调整官方upnp的为可设置超时已测试生效。<img width="1337" height="1018" alt="image" src="https://github.com/user-attachments/assets/7f3e7cd7-7e62-4dd9-8162-724a7963aa80" />
+<img width="964" height="1083" alt="image" src="https://github.com/user-attachments/assets/c5929440-2a53-4d2d-8e41-c000234cd46c" />
+。替换原有的fullcone为	SONiC Fullcone并引入了细节化设置和全锥形实际触发的流量查询
 <img width="1336" height="1198" alt="image" src="https://github.com/user-attachments/assets/e6b8aa0c-d6b9-4bc6-8e8c-50269fa8b982" />
-为https://github.com/chasey-dev/immortalwrt-mt798x-rebase 小修改版本
+本版本为https://github.com/chasey-dev/immortalwrt-mt798x-rebase 小修改版本，特此鸣谢
